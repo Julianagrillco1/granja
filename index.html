@@ -570,7 +570,8 @@ canvas { max-width: 100%; }
       </div>
     </div>
     <div style="font-size:11px;color:var(--text3);margin-top:8px">
-      Selecciona una fecha para ver qué lote de pienso estaba activo ese día y qué cajas lo comieron.
+      Selecciona una fecha para ver qué lote de pienso estaba activo ese día y qué cajas lo comieron.<br>
+      ⚠ Las cajas dejan de comer <b>2 días antes de la colecta</b> — esos días ya no cuentan en la trazabilidad.
     </div>
   </div>
 
@@ -776,9 +777,54 @@ function showSynced() {
   el.style.opacity = '1';
   setTimeout(() => el.style.opacity = '0', 2000);
 }
+// Construye la tabla TrazPienso en FORMATO LARGO para guardarla en el JSON
+// (lista plana de filas {lote, caja, fechas, estado} — fácil de importar en Excel/Power BI).
+function buildTrazPiensoFlat() {
+  // Si aún no existen estas funciones (caso muy raro al cargar), devolvemos vacío
+  if (typeof buildPeriodosPienso !== 'function' || typeof cajaConsumePienso !== 'function') return [];
+  const periodos = buildPeriodosPienso();
+  if (!periodos.length) return [];
+  const result = [];
+  periodos.forEach(p => {
+    // Cajas todavía activas en Nacimiento
+    incubacion.forEach(c => {
+      if (cajaConsumePienso(c.fechaIngreso, c.fechaColecta, p.fechaInicio, p.fechaFin)) {
+        result.push({
+          lote_pienso:        p.lote,
+          fecha_ini_lote:     p.fechaInicio,
+          fecha_fin_lote:     p.fechaFin || '',
+          caja:               c.caja,
+          fecha_ingreso_caja: c.fechaIngreso,
+          fecha_colecta_caja: c.fechaColecta,
+          estado_caja:        'activa'
+        });
+      }
+    });
+    // Cajas ya procesadas en trazabilidad
+    trazabilidadCaja.forEach(c => {
+      if (cajaConsumePienso(c.fechaIngreso, c.fechaColecta, p.fechaInicio, p.fechaFin)) {
+        result.push({
+          lote_pienso:        p.lote,
+          fecha_ini_lote:     p.fechaInicio,
+          fecha_fin_lote:     p.fechaFin || '',
+          caja:               c.caja,
+          fecha_ingreso_caja: c.fechaIngreso,
+          fecha_colecta_caja: c.fechaColecta,
+          estado_caja:        'procesada'
+        });
+      }
+    });
+  });
+  return result;
+}
+
 async function save() {
   if (!accessToken) return;
-  await writeData({ incubacion, trazabilidadCaja, trazabilidadLote, pienso, ventas, temperaturas, _updated: new Date().toISOString() });
+  await writeData({
+    incubacion, trazabilidadCaja, trazabilidadLote, pienso, ventas, temperaturas,
+    trazabilidadPienso: buildTrazPiensoFlat(),
+    _updated: new Date().toISOString()
+  });
 }
 async function initApp() {
   document.getElementById('auth-screen').style.display = 'none';
@@ -1375,13 +1421,27 @@ function buildPeriodosPienso() {
   }));
 }
 
+// Días previos a la colecta en los que ya NO comen (se les quita la comida)
+const DIAS_SIN_COMIDA = 2;
+
+// Devuelve la última fecha (YYYY-MM-DD) en la que la caja realmente comió.
+// Es fechaColecta − DIAS_SIN_COMIDA, porque 2 días antes de matarlas se les retira el pienso.
+function fechaUltimoDiaComiendo(fechaColecta) {
+  const d = new Date(fechaColecta);
+  d.setDate(d.getDate() - DIAS_SIN_COMIDA);
+  return d.toISOString().split('T')[0];
+}
+
 // ¿Una caja (con fechaIngreso y fechaColecta) "comió" un pienso activo entre [pIni, pFin]?
-// Sí, si su periodo de vida se solapa con el periodo del pienso.
+// Sí, si su periodo REAL DE COMIDA [fechaIngreso, fechaColecta − 2] se solapa con [pIni, pFin].
+// Los últimos 2 días antes de la colecta la caja ya no come.
 function cajaConsumePienso(fechaIngreso, fechaColecta, pIni, pFin) {
   if (!fechaIngreso || !fechaColecta) return false;
-  const ini = pIni;
+  const ultimoComida = fechaUltimoDiaComiendo(fechaColecta);
+  // Si la caja se mató antes de tener al menos 2 días de vida, no comió nada (caso raro).
+  if (ultimoComida < fechaIngreso) return false;
   const fin = pFin || '9999-12-31'; // sin fin = abierto
-  return fechaIngreso <= fin && ini <= fechaColecta;
+  return fechaIngreso <= fin && pIni <= ultimoComida;
 }
 
 function renderTrazPienso() {
